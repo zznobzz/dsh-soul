@@ -5222,6 +5222,10 @@ check('「N 个会话」必须与列表口径一致（不得用注册表原始�
     //
     // `tmp-` 前缀也一起拦：本会话排查「存为预设勾选立即应用」时写的是 tmp-repro-*.mjs，
     // 后缀合法、光看扩展名放行 —— 一次性脚本换了个马甲就绕过整条门禁。
+    //
+    // 白名单（fork ru）：脚本目录里也有**长期维护**的 shell 工具，它们不是「跑完忘删」
+    // 的一次性脚本。新增一个就在这里加一个 —— 未登记的临时文件照旧失败。
+    const allowedNonMjs = new Set(['sync-upstream.sh'])
     const entries = readdirSync(new URL('./', import.meta.url), { withFileTypes: true })
     const offenders = []
     for (const entry of entries) {
@@ -5231,6 +5235,7 @@ check('「N 个会话」必须与列表口径一致（不得用注册表原始�
         continue
       }
       if (entry.name.endsWith('.mjs')) continue
+      if (allowedNonMjs.has(entry.name)) continue
       offenders.push(entry.name)
     }
     assert.equal(offenders.length, 0,
