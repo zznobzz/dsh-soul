@@ -1,0 +1,132 @@
+# Авто-синхронизация ветки ru с вендором Aliuyanfeng/dsh-soul.
+#
+# Зачем: правки слоя A (русский язык ответа) — это enum + таблицы текстов внутри кода
+# плагина. Вендор выпускает релизы, поэтому ветка ru должна регулярно переезжать на
+# upstream/main, иначе обновления теряются. Ручной `scripts/sync-upstream.sh` делает то же
+# самое локально; этот workflow — страховка «раз в неделю, даже если все забыли».
+#
+# Политика: **лучше упасть, чем молча сломать**. Rebase-конфликт = падение job (GitHub
+# пришлёт уведомление), никакого авторазрешения конфликтов и никакого `-X theirs/ours`.
+# Отдельно это важно потому, что vendor-verify (scripts/verify-config.mjs) знает про
+# два языка (zh/en) и уже ловит «новые языковые таблицы» — падение здесь означает, что
+# после обновления нужно поправить наши правки, а не что «просто CI шумит».
+#
+# Точки правок форка, изменения которых вендором надо смотреть глазами:
+#   lib/config.mjs, lib/prompt-ru.mjs, index.mjs, client/index.mjs,
+#   locale/ru.json, scripts/verify-config.mjs
+
+name: Sync upstream
+
+on:
+  schedule:
+    # понедельник 06:00 UTC (= 09:00 МСК)
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # не отменяем уже идущую синхронизацию: полуприменённый rebase хуже ожидания
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_URL: https://github.com/Aliuyanfeng/dsh-soul.git
+  WORK_BRANCH: ru
+
+jobs:
+  sync:
+    name: rebase ru onto upstream/main
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout ru
+        uses: actions/checkout@v6
+        with:
+          ref: ru
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Configure git identity
+        run: |
+          git config user.name "dsh-soul-ru sync"
+          git config user.email "sync@users.noreply.github.com"
+
+      - name: Fetch upstream and report vendor changes
+        run: |
+          set -euo pipefail
+          git remote add upstream "$UPSTREAM_URL" 2>/dev/null || git remote set-url upstream "$UPSTREAM_URL"
+          # предыдущая известная точка upstream/main нужна для отчёта «что изменил вендор»
+          PREV="$(git rev-parse --verify --quiet refs/remotes/upstream/main || true)"
+          git fetch upstream --prune
+          NEW="$(git rev-parse refs/remotes/upstream/main)"
+          echo "upstream/main: ${PREV:-<none>} -> $NEW"
+          {
+            echo "### upstream/main"
+            echo ""
+            echo "\`${NEW:0:12}\`"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$PREV" ] && [ "$PREV" != "$NEW" ]; then
+            git diff --name-only "$PREV".."$NEW" > /tmp/vendor-changes.txt || true
+            echo "--- изменения вендора ---"
+            cat /tmp/vendor-changes.txt
+            {
+              echo "### Изменения вендора"
+              echo ""
+              echo '```'
+              cat /tmp/vendor-changes.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            # пересечение с точками правок форка
+            grep -E '^(lib/config\.mjs|lib/prompt-ru\.mjs|index\.mjs|client/index\.mjs|locale/ru\.json|scripts/verify-config\.mjs)$' \
+              /tmp/vendor-changes.txt > /tmp/touched.txt || true
+            if [ -s /tmp/touched.txt ]; then
+              echo "::warning::вендор задел точки правок слоя A — при конфликте разбирать вручную"
+              {
+                echo ""
+                echo "### ⚠ Вендор задел наши точки правок"
+                echo ""
+                echo '```'
+                cat /tmp/touched.txt
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            echo "upstream/main не изменился — rebase будет no-op"
+          fi
+
+      - name: Rebase ru onto upstream/main
+        run: |
+          set -euo pipefail
+          git rebase upstream/main
+
+      - name: Verify (config)
+        run: node scripts/verify-config.mjs
+
+      - name: Push ru (force-with-lease)
+        run: |
+          set -euo pipefail
+          git push --force-with-lease origin "$WORK_BRANCH"
+
+      - name: Report failure
+        if: failure()
+        run: |
+          {
+            echo "### ✗ Синхронизация с вендором не удалась"
+            echo ""
+            echo "Ветка \`ru\` **не** обновлена (и не запушена). Разбери локально:"
+            echo ""
+            echo '```'
+            echo "./scripts/sync-upstream.sh --check   # что изменил вендор"
+            echo "./scripts/sync-upstream.sh           # rebase + verify-config"
+            echo '```'
+            echo ""
+            echo "Конфликт в файлах наших точек правок — ждать от человека, не от бота."
+          } >> "$GITHUB_STEP_SUMMARY"

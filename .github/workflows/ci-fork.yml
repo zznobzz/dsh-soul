@@ -1,0 +1,57 @@
+# fork-only: не отправлять в upstream PR
+#
+# CI форк-ветки ru. Отдельный файл, а не правка вендорского ci.yml, по трём причинам:
+#   1. вендорский ci.yml — часть upstream-кода (`on: push [main]` + PR), правки в нём =
+#      лишний конфликт при каждом sync-upstream;
+#   2. на push в ru вендорский workflow не срабатывает вовсе (ветка не та);
+#   3. в upstream PR этот файл не идёт: PR собирается из ветки ru-pr, где только
+#      продуктовые 5 файлов (lib/config.mjs, lib/prompt-ru.mjs, index.mjs,
+#      client/index.mjs, locale/ru.json).
+#
+# Что проверяем и почему именно это:
+#   node scripts/verify-config.mjs — контракты конфига, структура PROMPT_TEXT /
+#     COMMAND_MESSAGES, сверка клиентских констант (LANGUAGE_VALUES и др.) с хостом;
+#     именно эти проверки ловят «добавили третий язык — сломали форму таблиц».
+#   node scripts/verify-client.mjs — клиентские контракты (селект языка, словари,
+#     хуки, сохранение полей).
+# Полный `npm run verify` здесь не гоняем сознательно: браузерные наборы
+# (verify-trail / verify-nav-icon) требуют Chrome, а verify-live-prompt / verify-compat
+# пропускаются и на вендорском CI («跳过不等于通过»). Вендорский ci.yml остаётся как есть.
+#
+# Зависимостей у пакета нет (только peerDependencies), поэтому `npm ci` не нужен:
+# проверочная цепочка вендора работает на голом Node.
+
+name: Verify (fork ru)
+
+on:
+  push:
+    branches: [ru]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: verify-config + verify-client
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: verify-config
+        run: node scripts/verify-config.mjs
+
+      - name: verify-client
+        run: node scripts/verify-client.mjs
